@@ -128,10 +128,27 @@ if not api_key:
 st.sidebar.subheader("Taxonomy Master")
 st.sidebar.info(f"Loaded **{len(tax_df):,}** categories from master file.")
 
+# Reset results when a new file is uploaded
+def clear_previous_results():
+    if 'audit_results' in st.session_state:
+        del st.session_state['audit_results']
+    if 'last_uploaded_file' in st.session_state:
+        del st.session_state['last_uploaded_file']
+
 # File Uploader
-uploaded_file = st.sidebar.file_uploader("Upload Product File to Audit (CSV/Excel)", type=["csv", "xlsx"])
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Product File to Audit (CSV/Excel)", 
+    type=["csv", "xlsx"],
+    on_change=clear_previous_results
+)
 
 if uploaded_file:
+    # Verify if file has changed to prevent old cached results
+    if st.session_state.get('last_uploaded_filename') != uploaded_file.name:
+        st.session_state['last_uploaded_filename'] = uploaded_file.name
+        if 'audit_results' in st.session_state:
+            del st.session_state['audit_results']
+
     if uploaded_file.name.endswith('.csv'):
         input_df = pd.read_csv(uploaded_file)
     else:
@@ -153,7 +170,7 @@ if uploaded_file:
     input_df['Team Full Path'] = input_df[team_path_col].astype(str).map(path_to_fullpath).fillna("UNMAPPED / INVALID PATH")
 
     st.markdown('<div class="css-card">', unsafe_allow_html=True)
-    st.write("### 2. Input Data Preview")
+    st.write(f"### 2. Input Data Preview ({len(input_df)} rows loaded)")
     st.dataframe(input_df[[title_col, team_path_col, 'Team Full Path']].head(5), use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -163,13 +180,13 @@ if uploaded_file:
         else:
             api_key = api_key.strip()
             
-            # Detect whether key is NVIDIA or OpenAI and set up client + model
+            # Detect whether key is NVIDIA or OpenAI and set up client + active model
             if api_key.startswith("nvapi-"):
                 client = OpenAI(
                     base_url="https://integrate.api.nvidia.com/v1",
                     api_key=api_key
                 )
-                model_name = "meta/llama-3.3-70b-instruct"
+                model_name = "nvidia/llama-3.1-nemotron-70b-instruct"
             else:
                 client = OpenAI(api_key=api_key)
                 model_name = "gpt-4o-mini"
