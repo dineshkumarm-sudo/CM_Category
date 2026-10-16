@@ -1,1 +1,6 @@
-
+[theme]
+primaryColor = "#EA580C"               # Warm Orange for primary actions/highlights
+backgroundColor = "#F8F9FA"            # Soft Light Gray page background
+secondaryBackgroundColor = "#FFFFFF"   # White card surfaces
+textColor = "#1E293B"                  # Dark Slate text
+font = "sans serif"
