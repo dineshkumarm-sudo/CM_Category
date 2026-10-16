@@ -64,26 +64,6 @@ st.markdown("""
         background-color: #C2410C !important;
         box-shadow: 0 4px 12px rgba(234, 88, 12, 0.3);
     }
-
-    /* Badges */
-    .badge-match {
-        background-color: #DCFCE7;
-        color: #15803D;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        display: inline-block;
-    }
-    .badge-mismatch {
-        background-color: #FFEDD5;
-        color: #EA580C;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        display: inline-block;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,7 +78,7 @@ def load_taxonomy():
         st.error("Taxonomy master file (taxonomy.csv or CM_Path 1.xlsx) not found in directory!")
         st.stop()
     
-    # Ensure correct column naming and clean nulls
+    # Clean column names and drop missing values
     df.columns = [c.strip() for c in df.columns]
     df = df.dropna(subset=['path', 'Fullpath']).copy()
     df['path'] = df['path'].astype(str)
@@ -107,7 +87,7 @@ def load_taxonomy():
 
 tax_df = load_taxonomy()
 
-# Pre-build Fast Search Index for Large Taxonomy Candidate Filtering
+# Pre-build Search Index for Large Taxonomy
 @st.cache_resource
 def build_search_index(taxonomy_df):
     vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words='english')
@@ -117,7 +97,7 @@ def build_search_index(taxonomy_df):
 vectorizer, tfidf_matrix = build_search_index(tax_df)
 
 def get_candidate_categories(product_title, team_fullpath, top_n=15):
-    """Retrieve candidate categories from taxonomy to keep prompt efficient."""
+    """Retrieve top candidates from taxonomy to stay well within API token limits."""
     query = f"{product_title} {team_fullpath}"
     query_vec = vectorizer.transform([query])
     similarities = cosine_similarity(query_vec, tfidf_matrix).flatten()
@@ -125,7 +105,7 @@ def get_candidate_categories(product_title, team_fullpath, top_n=15):
     
     candidates = tax_df.iloc[top_indices][['path', 'Fullpath']].to_dict(orient='records')
     
-    # Ensure team's mapped category is included in candidates if it exists
+    # Ensure team's mapped category is included in candidate options if it exists
     team_matches = tax_df[tax_df['Fullpath'] == team_fullpath].to_dict(orient='records')
     if team_matches and team_matches[0] not in candidates:
         candidates.insert(0, team_matches[0])
@@ -139,14 +119,14 @@ st.markdown('<p class="sub-header">Automated e-commerce taxonomy audit powered b
 # Sidebar Configuration
 st.sidebar.header("⚙️ Configuration")
 
-# API Key handling (Streamlit Secrets or Manual Input fallback)
+# Retrieve API Key from Streamlit Secrets or Sidebar Input
 api_key = st.secrets.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in st.secrets else None
 
 if not api_key:
-    api_key = st.sidebar.text_input("OpenAI API Key", type="password", help="Enter your key if not using central secrets")
+    api_key = st.sidebar.text_input("API Key (OpenAI or NVIDIA)", type="password", help="Enter key starting with nvapi- or sk-")
 
-st.sidebar.subheader("Taxonomy Stats")
-st.sidebar.info(f"Loaded **{len(tax_df):,}** categories from Master List.")
+st.sidebar.subheader("Taxonomy Master")
+st.sidebar.info(f"Loaded **{len(tax_df):,}** categories from master file.")
 
 # File Uploader
 uploaded_file = st.sidebar.file_uploader("Upload Product File to Audit (CSV/Excel)", type=["csv", "xlsx"])
@@ -158,7 +138,7 @@ if uploaded_file:
         input_df = pd.read_excel(uploaded_file)
 
     st.markdown('<div class="css-card">', unsafe_allow_html=True)
-    st.write("### 1. Select Columns")
+    st.write("### 1. Select Column Mappings")
     c1, c2 = st.columns(2)
     with c1:
         title_col = st.selectbox("Select Product Title Column", input_df.columns)
@@ -173,19 +153,30 @@ if uploaded_file:
     input_df['Team Full Path'] = input_df[team_path_col].astype(str).map(path_to_fullpath).fillna("UNMAPPED / INVALID PATH")
 
     st.markdown('<div class="css-card">', unsafe_allow_html=True)
-    st.write("### 2. Input Data Preview (With Auto-Populated Full Path)")
+    st.write("### 2. Input Data Preview")
     st.dataframe(input_df[[title_col, team_path_col, 'Team Full Path']].head(5), use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     if st.button("🚀 Run Categorization Audit"):
         if not api_key:
-            st.error("API Key missing! Please configure secrets or supply an OpenAI API key.")
+            st.error("API Key missing! Please configure Streamlit secrets or supply an API key in the sidebar.")
         else:
-            client = OpenAI(api_key=api_key)
+            api_key = api_key.strip()
+            
+            # Detect whether key is NVIDIA or OpenAI and set up client + model
+            if api_key.startswith("nvapi-"):
+                client = OpenAI(
+                    base_url="https://integrate.api.nvidia.com/v1",
+                    api_key=api_key
+                )
+                model_name = "meta/llama-3.1-8b-instruct"
+            else:
+                client = OpenAI(api_key=api_key)
+                model_name = "gpt-4o-mini"
+
             results = []
             progress_bar = st.progress(0)
             status_text = st.empty()
-
             total_items = len(input_df)
 
             for idx, row in input_df.iterrows():
@@ -206,28 +197,41 @@ if uploaded_file:
                 {json.dumps(candidates, indent=2)}
 
                 Instructions:
-                1. Identify product type from the title.
-                2. Evaluate if the Team Mapped Category accurately describes the product.
-                3. Choose the absolute BEST fitting candidate category from the candidate list provided.
+                1. Identify the exact product type from the title.
+                2. Check if Team Mapped Full Path accurately describes the product.
+                3. Select the SINGLE BEST fitting category from the candidate list provided.
                 
-                Return JSON in exact format:
+                You MUST return ONLY a raw JSON object with these exact keys:
                 {{
                     "product_type": "Brief extracted product type",
-                    "is_match": true/false,
+                    "is_match": true or false,
                     "suggested_path": "exact short path code from candidate list",
                     "suggested_fullpath": "exact Fullpath string from candidate list",
-                    "reasoning": "Brief 1-sentence concise explanation"
+                    "reasoning": "Brief 1-sentence explanation"
                 }}
                 """
 
                 try:
-                    response = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"},
-                        temperature=0
-                    )
-                    res = json.loads(response.choices[0].message.content)
+                    # Request parameters depending on provider compatibility
+                    kwargs = {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0
+                    }
+                    
+                    if not api_key.startswith("nvapi-"):
+                        kwargs["response_format"] = {"type": "json_object"}
+
+                    response = client.chat.completions.create(**kwargs)
+                    raw_content = response.choices[0].message.content.strip()
+
+                    # Clean markdown code blocks if present in response
+                    if raw_content.startswith("```json"):
+                        raw_content = raw_content.replace("```json", "").replace("```", "").strip()
+                    elif raw_content.startswith("```"):
+                        raw_content = raw_content.replace("```", "").strip()
+
+                    res = json.loads(raw_content)
 
                     results.append({
                         "Product Title": title,
@@ -260,13 +264,12 @@ if uploaded_file:
             audit_df = pd.DataFrame(results)
             st.session_state['audit_results'] = audit_df
 
-    # Display Results if available
+    # Display Results Dashboard
     if 'audit_results' in st.session_state:
         audit_df = st.session_state['audit_results']
 
         st.markdown('### 3. Audit Dashboard')
         
-        # Key Metrics Row
         total = len(audit_df)
         matches = len(audit_df[audit_df["Match Status"] == "MATCH"])
         mismatches = len(audit_df[audit_df["Match Status"] == "MISMATCH"])
@@ -278,7 +281,6 @@ if uploaded_file:
         m3.metric("Mismatches Found", mismatches, delta=f"{mismatches} issues", delta_color="inverse")
         m4.metric("Mapping Accuracy", f"{accuracy:.1f}%")
 
-        # Filters
         filter_option = st.radio(
             "Filter Results Table:",
             ["Show All", "Show Mismatches Only", "Show Matches Only"],
@@ -291,10 +293,9 @@ if uploaded_file:
         elif filter_option == "Show Matches Only":
             display_df = display_df[display_df["Match Status"] == "MATCH"]
 
-        # Render Table
         st.dataframe(display_df, use_container_width=True, height=400)
 
-        # Download Buttons
+        # Download Report Buttons
         c_dl1, c_dl2 = st.columns(2)
         with c_dl1:
             csv_data = audit_df.to_csv(index=False).encode('utf-8')
