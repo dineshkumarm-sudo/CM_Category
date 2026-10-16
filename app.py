@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import requests
 from openai import OpenAI
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -14,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom Styling
 st.markdown("""
 <style>
     .stApp { background-color: #F8F9FA; }
@@ -102,14 +103,13 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 if uploaded_file:
-    # Clear old results if a different file is uploaded
-    file_identifier = f"{uploaded_file.name}_{uploaded_file.size}"
-    if st.session_state.get('active_file_id') != file_identifier:
-        st.session_state['active_file_id'] = file_identifier
+    # Ensure previous audit results are removed when a new file is uploaded
+    current_file_signature = f"{uploaded_file.name}_{uploaded_file.size}"
+    if st.session_state.get('loaded_file_sig') != current_file_signature:
+        st.session_state['loaded_file_sig'] = current_file_signature
         if 'audit_results' in st.session_state:
             del st.session_state['audit_results']
 
-    # Read file
     if uploaded_file.name.endswith('.csv'):
         input_df = pd.read_csv(uploaded_file)
     else:
@@ -138,28 +138,14 @@ if uploaded_file:
             st.error("API Key missing! Please configure Streamlit secrets or supply an API key in the sidebar.")
         else:
             api_key = api_key.strip()
-            
-            # Setup OpenAI or NVIDIA Client dynamically
-            if api_key.startswith("nvapi-"):
-                client = OpenAI(
-                    base_url="https://integrate.api.nvidia.com/v1",
-                    api_key=api_key
-                )
-                try:
-                    available_models = client.models.list()
-                    model_name = available_models.data[0].id if available_models.data else "nvidia/llama-3.1-nemotron-70b-instruct"
-                except Exception:
-                    model_name = "nvidia/llama-3.1-nemotron-70b-instruct"
-            else:
-                client = OpenAI(api_key=api_key)
-                model_name = "gpt-4o-mini"
-
-            st.info(f"Connected using model: `{model_name}`")
+            is_nvidia = api_key.startswith("nvapi-")
 
             results = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             total_items = len(input_df)
+
+            openai_client = None if is_nvidia else OpenAI(api_key=api_key)
 
             for idx, row in input_df.iterrows():
                 title = str(row[title_col])
@@ -183,7 +169,7 @@ if uploaded_file:
                 2. Check if Team Mapped Full Path accurately describes the product.
                 3. Select the SINGLE BEST fitting category from the candidate list provided.
                 
-                You MUST return ONLY a raw JSON object with these exact keys:
+                Respond ONLY with a valid JSON object matching this structure:
                 {{
                     "product_type": "Brief extracted product type",
                     "is_match": true or false,
@@ -194,21 +180,49 @@ if uploaded_file:
                 """
 
                 try:
-                    kwargs = {
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0
-                    }
-                    if not api_key.startswith("nvapi-"):
-                        kwargs["response_format"] = {"type": "json_object"}
+                    if is_nvidia:
+                        # Direct HTTP call to NVIDIA NIM API endpoint
+                        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+                        headers = {
+                            "Authorization": f"Bearer {api_key}",
+                            "Accept": "application/json",
+                            "Content-Type": "application/json"
+                        }
+                        payload = {
+                            "model": "meta/llama-3.1-70b-instruct",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.1,
+                            "top_p": 0.7,
+                            "max_tokens": 512
+                        }
+                        
+                        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                        
+                        if resp.status_code != 200:
+                            # Fallback model attempt if primary model returns error
+                            payload["model"] = "mistralai/mistral-large-2-instruct"
+                            resp = requests.post(url, headers=headers, json=payload, timeout=30)
 
-                    response = client.chat.completions.create(**kwargs)
-                    raw_content = response.choices[0].message.content.strip()
+                        resp_json = resp.json()
+                        if "choices" in resp_json:
+                            raw_content = resp_json["choices"][0]["message"]["content"].strip()
+                        else:
+                            raise Exception(f"NVIDIA API Error: {resp.text}")
+                    else:
+                        # OpenAI API
+                        response = openai_client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                            response_format={"type": "json_object"},
+                            temperature=0
+                        )
+                        raw_content = response.choices[0].message.content.strip()
 
-                    if raw_content.startswith("```json"):
-                        raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-                    elif raw_content.startswith("```"):
-                        raw_content = raw_content.replace("```", "").strip()
+                    # Clean markdown wrapping if model returns ```json ... ```
+                    if "```json" in raw_content:
+                        raw_content = raw_content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in raw_content:
+                        raw_content = raw_content.split("```")[1].split("```")[0].strip()
 
                     res = json.loads(raw_content)
 
@@ -222,6 +236,7 @@ if uploaded_file:
                         "AI Suggested Full Path": res.get("suggested_fullpath", ""),
                         "AI Reasoning": res.get("reasoning", "")
                     })
+
                 except Exception as e:
                     results.append({
                         "Product Title": title,
