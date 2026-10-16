@@ -169,7 +169,7 @@ if uploaded_file:
                     base_url="https://integrate.api.nvidia.com/v1",
                     api_key=api_key
                 )
-                model_name = "meta/llama-3.1-8b-instruct"
+                model_name = "meta/llama-3.3-70b-instruct"
             else:
                 client = OpenAI(api_key=api_key)
                 model_name = "gpt-4o-mini"
