@@ -212,7 +212,6 @@ if uploaded_file:
                 """
 
                 try:
-                    # Request parameters depending on provider compatibility
                     kwargs = {
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],
@@ -225,7 +224,7 @@ if uploaded_file:
                     response = client.chat.completions.create(**kwargs)
                     raw_content = response.choices[0].message.content.strip()
 
-                    # Clean markdown code blocks if present in response
+                    # Clean markdown formatting if returned
                     if raw_content.startswith("```json"):
                         raw_content = raw_content.replace("```json", "").replace("```", "").strip()
                     elif raw_content.startswith("```"):
