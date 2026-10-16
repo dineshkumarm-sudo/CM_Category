@@ -129,23 +129,21 @@ st.sidebar.subheader("Taxonomy Master")
 st.sidebar.info(f"Loaded **{len(tax_df):,}** categories from master file.")
 
 # Reset results when a new file is uploaded
-def clear_previous_results():
-    if 'audit_results' in st.session_state:
-        del st.session_state['audit_results']
-    if 'last_uploaded_file' in st.session_state:
-        del st.session_state['last_uploaded_file']
+def handle_file_upload():
+    st.session_state.clear()
 
 # File Uploader
 uploaded_file = st.sidebar.file_uploader(
     "Upload Product File to Audit (CSV/Excel)", 
     type=["csv", "xlsx"],
-    on_change=clear_previous_results
+    on_change=handle_file_upload
 )
 
 if uploaded_file:
-    # Verify if file has changed to prevent old cached results
-    if st.session_state.get('last_uploaded_filename') != uploaded_file.name:
-        st.session_state['last_uploaded_filename'] = uploaded_file.name
+    # Ensure no old data is retained from previous runs
+    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+    if st.session_state.get('current_file_id') != file_id:
+        st.session_state['current_file_id'] = file_id
         if 'audit_results' in st.session_state:
             del st.session_state['audit_results']
 
@@ -186,7 +184,7 @@ if uploaded_file:
                     base_url="https://integrate.api.nvidia.com/v1",
                     api_key=api_key
                 )
-                model_name = "nvidia/llama-3.1-nemotron-70b-instruct"
+                model_name = "mistralai/mistral-large-2-instruct"
             else:
                 client = OpenAI(api_key=api_key)
                 model_name = "gpt-4o-mini"
@@ -241,7 +239,7 @@ if uploaded_file:
                     response = client.chat.completions.create(**kwargs)
                     raw_content = response.choices[0].message.content.strip()
 
-                    # Clean markdown formatting if returned
+                    # Clean markdown code blocks if present
                     if raw_content.startswith("```json"):
                         raw_content = raw_content.replace("```json", "").replace("```", "").strip()
                     elif raw_content.startswith("```"):
